@@ -3,7 +3,7 @@ services:
     name: hoa-command-center
     runtime: python
     plan: free
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install -r requirements.txt && python -m compileall -q .
     startCommand: gunicorn app:app
     healthCheckPath: /health
     envVars:
