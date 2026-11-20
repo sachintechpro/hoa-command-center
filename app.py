@@ -54,6 +54,33 @@ class BoardItem(db.Model):
     status = db.Column(db.String(40), default="Pending")
     details = db.Column(db.Text, default="")
 
+
+class Assessment(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    unit = db.Column(db.String(30), nullable=False)
+    owner = db.Column(db.String(100), nullable=False)
+    description = db.Column(db.String(160), default="Monthly assessment")
+    amount = db.Column(db.Numeric(10,2), nullable=False)
+    due_date = db.Column(db.Date, nullable=False)
+    status = db.Column(db.String(30), default="Due")
+
+class Payment(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    assessment_id = db.Column(db.Integer, db.ForeignKey("assessment.id"), nullable=False)
+    amount = db.Column(db.Numeric(10,2), nullable=False)
+    method = db.Column(db.String(40), default="ACH")
+    reference = db.Column(db.String(60), default="")
+    received_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+class Invoice(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    vendor = db.Column(db.String(120), nullable=False)
+    invoice_number = db.Column(db.String(50), nullable=False)
+    description = db.Column(db.String(180), default="")
+    amount = db.Column(db.Numeric(10,2), nullable=False)
+    due_date = db.Column(db.Date, nullable=False)
+    status = db.Column(db.String(30), default="Pending")
+
 def log(entity, entity_id, action, actor="Manager"):
     db.session.add(Audit(entity=entity, entity_id=entity_id, action=action, actor=actor))
 
@@ -78,6 +105,17 @@ def seed():
         db.session.add_all([
             BoardItem(title="North gate modernization", category="Capital project", status="Pending", details="Review vendor proposals and funding options."),
             BoardItem(title="Landscape services renewal", category="Contract", status="In Discussion", details="Compare annual service scope and pricing.")])
+
+    if Assessment.query.count() == 0:
+        db.session.add_all([
+            Assessment(unit="A-104", owner="Jordan Lee", description="November 2026 assessment", amount=285.00, due_date=datetime(2026,11,1).date(), status="Paid"),
+            Assessment(unit="B-207", owner="Taylor Morgan", description="November 2026 assessment", amount=285.00, due_date=datetime(2026,11,1).date(), status="Due"),
+            Assessment(unit="C-118", owner="Alex Rivera", description="November 2026 assessment", amount=285.00, due_date=datetime(2026,11,1).date(), status="Overdue"),
+            Assessment(unit="D-302", owner="Casey Brooks", description="November 2026 assessment", amount=285.00, due_date=datetime(2026,11,1).date(), status="Paid")])
+    if Invoice.query.count() == 0:
+        db.session.add_all([
+            Invoice(vendor="Evergreen Grounds", invoice_number="EG-2026-118", description="November landscape maintenance", amount=1850.00, due_date=datetime(2026,11,25).date(), status="Pending"),
+            Invoice(vendor="BluePeak Pool Services", invoice_number="BP-2026-044", description="Pool equipment service", amount=640.00, due_date=datetime(2026,11,18).date(), status="Approved")])
     db.session.commit()
 
 @app.get("/")
@@ -102,7 +140,7 @@ def bootstrap():
         "vendors":[{"id":x.id,"name":x.name,"trade":x.trade,"insured":x.insured} for x in vendors],
         "reviews":[{"id":x.id,"title":x.title,"resident":x.resident,"category":x.category,"status":x.status,"details":x.details} for x in reviews],
         "board":[{"id":x.id,"title":x.title,"category":x.category,"status":x.status,"details":x.details} for x in board],
-        "audit":[{"entity":x.entity,"entity_id":x.entity_id,"action":x.action,"actor":x.actor,"when":x.created_at.strftime("%b %d · %I:%M %p")} for x in audits]})
+        "audit":[{"entity":x.entity,"entity_id":x.entity_id,"action":x.action,"actor":x.actor,"when":x.created_at.strftime("%b %d · %I:%M %p")} for x in audits],"finance":{"assessments":[{"id":x.id,"unit":x.unit,"owner":x.owner,"description":x.description,"amount":float(x.amount),"dueDate":x.due_date.strftime("%b %d, %Y"),"status":x.status} for x in Assessment.query.order_by(Assessment.unit).all()],"invoices":[{"id":x.id,"vendor":x.vendor,"number":x.invoice_number,"description":x.description,"amount":float(x.amount),"dueDate":x.due_date.strftime("%b %d, %Y"),"status":x.status} for x in Invoice.query.order_by(Invoice.due_date).all()],"payments":[{"id":x.id,"assessmentId":x.assessment_id,"amount":float(x.amount),"method":x.method,"reference":x.reference,"received":x.received_at.strftime("%b %d, %Y")} for x in Payment.query.order_by(Payment.received_at.desc()).all()]}})
 
 @app.post("/api/work-orders")
 def create_work_order():
@@ -156,6 +194,33 @@ def board_decision(item_id):
     log("Board item", item.id, f"Board status: {decision}", "Board")
     db.session.commit()
     return jsonify(message="Board item updated.")
+
+
+@app.post("/api/assessments/<int:item_id>/payment")
+def record_payment(item_id):
+    item = db.session.get(Assessment, item_id)
+    if not item: return jsonify(error="Assessment not found."), 404
+    if item.status == "Paid": return jsonify(error="This assessment is already paid."), 400
+    data = request.get_json(silent=True) or {}
+    method = data.get("method", "ACH")
+    if method not in ["ACH", "Check", "Card", "Manual entry"]: return jsonify(error="Invalid payment method."), 400
+    payment = Payment(assessment_id=item.id, amount=item.amount, method=method, reference="DEMO-" + str(item.id) + "-" + datetime.utcnow().strftime("%H%M%S"))
+    item.status = "Paid"
+    db.session.add(payment); db.session.flush()
+    log("Assessment", item.id, "Demo payment recorded: " + method, data.get("actor", "Manager"))
+    db.session.commit()
+    return jsonify(message="Demo payment recorded.", reference=payment.reference), 201
+
+@app.post("/api/invoices/<int:item_id>/decision")
+def invoice_decision(item_id):
+    item = db.session.get(Invoice, item_id)
+    if not item: return jsonify(error="Invoice not found."), 404
+    decision = (request.get_json(silent=True) or {}).get("decision")
+    if decision not in ["Approved", "Paid", "On Hold", "Rejected"]: return jsonify(error="Invalid invoice status."), 400
+    item.status = decision
+    log("Vendor invoice", item.id, "Invoice " + item.invoice_number + ": " + decision)
+    db.session.commit()
+    return jsonify(message="Invoice updated.")
 
 @app.post("/api/vendors")
 def add_vendor():
